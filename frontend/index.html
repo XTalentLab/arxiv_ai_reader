@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>arXiv Fast Paper Reader</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <!-- Marked.js for Markdown rendering -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <!-- KaTeX for LaTeX rendering -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+</head>
+<body>
+    <!-- Header -->
+    <header class="header">
+        <div class="container">
+            <h1 id="headerTitle" style="cursor: pointer;">arXiv Fast Paper Reader</h1>
+            <div class="header-actions">
+                <!-- Explorer 按钮：学者搜索 + 会议论文 -->
+                <button id="explorerBtn" class="config-icon-btn" title="Explorer: 学者搜索 / 会议论文">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="11" cy="11" r="8"></circle>
+                        <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                        <line x1="11" y1="8" x2="11" y2="14"></line>
+                        <line x1="8" y1="11" x2="14" y2="11"></line>
+                    </svg>
+                </button>
+                <button id="configBtn" class="config-icon-btn" title="Config">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="12" cy="12" r="3"></circle>
+                        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+                    </svg>
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <!-- Pull-to-refresh indicator -->
+    <div id="pullRefreshIndicator" class="pull-refresh-indicator">
+        <div class="pull-refresh-spinner"></div>
+        <span>松开刷新</span>
+    </div>
+
+    <!-- Update notification -->
+    <div id="updateNotification" class="update-notification" style="display: none;">
+        <span>🎉 有新的论文更新！</span>
+        <button onclick="refreshPapers()" class="btn-small">刷新查看</button>
+        <button onclick="dismissUpdate()" class="btn-small btn-dismiss">×</button>
+    </div>
+
+    <!-- Tabs: All papers fixed left, categories scrollable -->
+    <div class="tabs-container">
+        <div class="tabs-wrapper">
+            <div class="tabs">
+                <button class="tab-btn tab-all active" data-tab="all" id="tabAll">全部论文</button>
+                <div class="tabs-scroll">
+                    <div id="categoryTabsContainer" class="tabs-scroll-inner"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Search Bar & Controls -->
+    <div class="search-container">
+        <div class="container">
+            <div class="search-bar-wrapper" id="searchBarWrapper">
+                <input 
+                    type="text" 
+                    id="searchInput" 
+                    class="search-input" 
+                    placeholder="搜索论文、ai: 语义搜索，或拖入 PDF 文件..."
+                >
+                <div class="search-filters" id="searchFilters">
+                    <select id="sortSelect" class="sort-select">
+                        <option value="relevance">按相关性排序</option>
+                        <option value="latest">按最新排序</option>
+                    </select>
+                    <div class="filter-settings-wrapper">
+                        <button id="filterSettingsBtn" class="filter-settings-btn" title="Advanced filter settings">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                        </button>
+                        <div id="filterSettingsPopover" class="filter-settings-popover">
+                            <div class="filter-settings-content">
+                                <h4 class="filter-settings-title">Advanced Filters</h4>
+                                <div class="filter-settings-body">
+                                    <label class="filter-settings-option">
+                                        <input type="checkbox" id="filterHideIrrelevant" />
+                                        <span class="checkbox-custom"></span>
+                                        <span>Hide irrelevant articles</span>
+                                    </label>
+                                    <label class="filter-settings-option">
+                                        <input type="checkbox" id="filterHideStarred" />
+                                        <span class="checkbox-custom"></span>
+                                        <span>Hide Starred articles</span>
+                                    </label>
+                                    <div class="filter-settings-row">
+                                        <label>Date range</label>
+                                        <div class="filter-settings-daterange">
+                                            <input type="date" id="filterFromDate" />
+                                            <span>–</span>
+                                            <input type="date" id="filterToDate" />
+                                        </div>
+                                    </div>
+                                    <div class="filter-settings-row">
+                                        <label>Relevance score (0–10)</label>
+                                        <div class="filter-settings-score">
+                                            <input type="number" id="filterScoreMin" min="0" max="10" step="0.5" placeholder="Min" />
+                                            <span>–</span>
+                                            <input type="number" id="filterScoreMax" min="0" max="10" step="0.5" placeholder="Max" />
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="filter-settings-footer">
+                                    <button id="filterSettingsApply" class="btn-apply">Apply</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <button id="clearKeywordBtn" class="btn btn-secondary" style="display: none;">清除筛选</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Timeline -->
+    <main class="container">
+        <!-- 每日推荐区域 -->
+        <div id="dailyPicksSection" class="daily-picks-section" style="display: none;">
+            <div class="daily-picks-header">
+                <h2 class="daily-picks-title">每日推荐</h2>
+                <span class="daily-picks-date" id="dailyPicksDate"></span>
+            </div>
+            <div class="daily-picks-scroll" id="dailyPicksContainer">
+                <!-- 推荐卡片通过JS动态插入 -->
+            </div>
+        </div>
+
+        <div id="timeline" class="timeline">
+            <!-- Papers will be loaded here -->
+        </div>
+        
+        <div id="loading" class="loading" style="display: none;">
+            <div class="spinner"></div>
+            <p>Loading papers...</p>
+        </div>
+        
+        <div id="loadMore" class="load-more" style="display: none;">
+            <button class="btn btn-secondary">Load More</button>
+        </div>
+        
+        <!-- End marker is dynamically added by JS -->
+    </main>
+
+    <!-- Config Modal -->
+    <div id="configModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Configuration</h2>
+                <button class="close" id="configModalClose">&times;</button>
+            </div>
+            <div id="configUnsavedBanner" class="config-unsaved-banner" style="display: none;">
+                <span class="config-unsaved-text">Unsaved changes</span>
+                <span class="config-unsaved-hint">Click × again to discard</span>
+            </div>
+            <div class="modal-body">
+                <h3 style="margin-top: 0;">关键词设置</h3>
+                
+                <div class="form-group">
+                    <label>Filter Keywords (comma separated)</label>
+                    <input type="text" id="filterKeywords" class="input" 
+                           placeholder="machine learning, computer vision, NLP">
+                </div>
+                
+                <div class="form-group">
+                    <label>Negative Keywords (comma separated) - Auto-reject papers containing these</label>
+                    <input type="text" id="negativeKeywords" class="input" 
+                           placeholder="medical, protein, clinical">
+                </div>
+                
+                <h3>问答设置</h3>
+                
+                <div class="form-group">
+                    <label>Preset Questions (one per line)</label>
+                    <textarea id="presetQuestions" class="textarea" rows="8"
+                              placeholder="What is the main contribution?&#10;What are the key innovations?"></textarea>
+                </div>
+                
+                <div class="form-group">
+                    <label>System Prompt</label>
+                    <textarea id="systemPrompt" class="textarea" rows="4"
+                              placeholder="You are a helpful AI assistant..."></textarea>
+                </div>
+                
+                <h3>模型设置</h3>
+                
+                <div class="form-group">
+                    <label>Model</label>
+                    <input type="text" id="model" class="input" 
+                           placeholder="deepseek-chat">
+                </div>
+                
+                <div class="form-group">
+                    <label>Temperature (0-2)</label>
+                    <input type="number" id="temperature" class="input" 
+                           min="0" max="2" step="0.1" placeholder="0.3">
+                </div>
+                
+                <div class="form-group">
+                    <label>Max Tokens (100-8000)</label>
+                    <input type="number" id="maxTokens" class="input" 
+                           min="100" max="8000" step="100" placeholder="2000">
+                </div>
+                
+                <h3>抓取设置</h3>
+                
+                <div class="form-group">
+                    <label>Fetch Interval (seconds, minimum 60)</label>
+                    <input type="number" id="fetchInterval" class="input" 
+                           min="60" step="60" placeholder="300">
+                </div>
+                
+                <div class="form-group">
+                    <label>Max Papers Per Fetch (1-500)</label>
+                    <input type="number" id="maxPapersPerFetch" class="input" 
+                           min="1" max="500" step="10" placeholder="100">
+                </div>
+                
+                <h3>分析设置</h3>
+                
+                <div class="form-group">
+                    <label>Concurrent Papers (1-50)</label>
+                    <input type="number" id="concurrentPapers" class="input" 
+                           min="1" max="50" step="1" placeholder="10">
+                </div>
+                
+                <div class="form-group">
+                    <label>Min Relevance Score for Stage 2 (0-10)</label>
+                    <input type="number" id="minRelevanceScoreForStage2" class="input" 
+                           min="0" max="10" step="0.5" placeholder="6">
+                </div>
+                
+                <h3>Star Categories (for AI classification, one per line, narrowest first)</h3>
+                <div class="form-group">
+                    <label>Star Categories - papers are classified into these when starred</label>
+                    <textarea id="starCategories" class="textarea" rows="5"
+                              placeholder="高效视频生成&#10;LLM稀疏注意力&#10;注意力机制&#10;Roll-out方法"></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button id="saveConfig" class="btn btn-primary">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Paper Detail Modal -->
+    <div id="paperModal" class="modal">
+        <div class="modal-content modal-large">
+            <div class="modal-header">
+                <h2 id="paperTitle"></h2>
+                <div class="modal-header-actions">
+                    <button id="starModalBtn" class="icon-btn icon-star" title="Star/Unstar">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>
+                    </button>
+                    <button id="exportBtn" class="icon-btn icon-download" title="Export Markdown">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                    </button>
+                    <button id="exportScreenshotBtn" class="icon-btn icon-camera" title="Copy Screenshot">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
+                    </button>
+                    <button id="shareBtn" class="icon-btn icon-share" title="Share">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"></circle><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="19" r="3"></circle><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"></line><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"></line></svg>
+                    </button>
+                    <button id="fullscreenBtn" class="icon-btn icon-maximize" title="Toggle Fullscreen">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1="21" y1="3" x2="14" y2="10"></line><line x1="3" y1="21" x2="10" y2="14"></line></svg>
+                    </button>
+                    <button class="close icon-close" title="Close">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                    </button>
+                </div>
+            </div>
+            <div class="modal-body">
+                <div id="paperDetails"></div>
+                
+                <!-- Relevance Editor (only for non-relevant papers) -->
+                <div id="relevanceEditor" class="relevance-editor" style="display: none;">
+                    <h3>🔧 修改相关性</h3>
+                    <p class="relevance-hint">此文章被AI标记为不相关（评分: <span id="currentRelevanceScore">0</span>/10），你可以手动修改为相关并重新评分。</p>
+                    <div class="relevance-controls">
+                        <label for="relevanceScoreInput">新评分 (0-10):</label>
+                        <input 
+                            type="number" 
+                            id="relevanceScoreInput" 
+                            class="relevance-score-input" 
+                            min="0" 
+                            max="10" 
+                            step="0.1" 
+                            value="5"
+                        >
+                        <button onclick="updateRelevance(currentPaperId)" class="btn btn-primary">
+                            ✓ 标记为相关
+                        </button>
+                    </div>
+                </div>
+                
+                <div class="qa-section">
+                    <h3>💬 Questions & Answers</h3>
+                    <div id="qaList"></div>
+                    
+                    <div class="ask-input-container">
+                        <input 
+                            type="text" 
+                            id="askInput" 
+                            class="input" 
+                            placeholder="Ask a question about this paper... (Press Enter)"
+                        >
+                        <div id="askLoading" class="ask-loading" style="display: none;">
+                            <div class="spinner-small"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Explorer Modal: 学者搜索 + 会议论文 -->
+    <div id="explorerModal" class="modal">
+        <div class="modal-content modal-large">
+            <div class="modal-header">
+                <h2>Explorer</h2>
+                <button class="close" id="explorerModalClose">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                </button>
+            </div>
+            <div class="modal-body">
+                <!-- Explorer 内部 Tab 切换 -->
+                <div class="explorer-tabs">
+                    <button class="explorer-tab active" data-explorer-tab="scholar">🎓 学者搜索</button>
+                    <button class="explorer-tab" data-explorer-tab="conference">📋 会议论文</button>
+                </div>
+
+                <!-- 学者搜索面板 -->
+                <div id="explorerScholarPanel" class="explorer-panel active">
+                    <div class="explorer-form">
+                        <div class="form-group">
+                            <label>Google Scholar 个人主页 URL</label>
+                            <input type="text" id="scholarUrl" class="input" 
+                                   placeholder="https://scholar.google.com/citations?user=XXXXX&hl=en">
+                        </div>
+                        <div class="explorer-form-row">
+                            <div class="form-group" style="flex:1;">
+                                <label>起始年份</label>
+                                <input type="number" id="scholarYearFrom" class="input" value="2018" min="1990" max="2030">
+                            </div>
+                            <div class="form-group" style="flex:1;">
+                                <label>结束年份</label>
+                                <input type="number" id="scholarYearTo" class="input" value="2026" min="1990" max="2030">
+                            </div>
+                        </div>
+                        <button id="scholarAnalyzeBtn" class="btn btn-primary" style="width:100%;">开始分析</button>
+                    </div>
+                    <!-- 学者分析结果区域 -->
+                    <div id="scholarResults" class="explorer-results" style="display:none;">
+                        <div id="scholarProgress" class="explorer-progress"></div>
+                        <div id="scholarAuthorBio" class="explorer-author-bio"></div>
+                        <div id="scholarPaperList" class="explorer-paper-list"></div>
+                    </div>
+                </div>
+
+                <!-- 会议论文面板 -->
+                <div id="explorerConferencePanel" class="explorer-panel">
+                    <div class="explorer-form">
+                        <div class="explorer-form-row">
+                            <div class="form-group" style="flex:1;">
+                                <label>选择会议</label>
+                                <select id="conferenceSelect" class="sort-select" style="width:100%;">
+                                    <option value="CVPR">CVPR</option>
+                                    <option value="ICCV">ICCV</option>
+                                    <option value="ECCV">ECCV</option>
+                                    <option value="ICLR">ICLR</option>
+                                    <option value="ICML">ICML</option>
+                                </select>
+                            </div>
+                            <div class="form-group" style="flex:1;">
+                                <label>年份</label>
+                                <input type="number" id="conferenceYear" class="input" value="2024" min="2013" max="2030">
+                            </div>
+                        </div>
+                        <button id="conferenceAnalyzeBtn" class="btn btn-primary" style="width:100%;">开始分析</button>
+                    </div>
+                    <!-- 会议分析结果区域 -->
+                    <div id="conferenceResults" class="explorer-results" style="display:none;">
+                        <div id="conferenceProgress" class="explorer-progress"></div>
+                        <div id="conferencePaperList" class="explorer-paper-list"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Fullscreen PDF Viewer -->
+    <div id="fullscreenPdfViewer" class="fullscreen-pdf-viewer" style="display: none;">
+        <div class="pdf-viewer-header">
+            <div class="pdf-viewer-controls">
+                <a id="pdfViewerLink" href="" target="_blank" class="pdf-download-link">📄 PDF链接</a>
+                <button onclick="closeFullscreenPdf()" class="btn btn-secondary btn-compact">关闭预览</button>
+            </div>
+        </div>
+        <iframe id="fullscreenPdfFrame" src="" frameborder="0"></iframe>
+    </div>
+
+    <!-- Toast notification container -->
+    <div id="toastContainer" class="toast-container"></div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
+
