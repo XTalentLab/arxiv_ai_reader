@@ -1,6 +1,6 @@
 # arXiv AI Reader
 
-# Based on https://github.com/MarsTechHAN/Arxiv-AI-Reader/
+## Based on https://github.com/MarsTechHAN/Arxiv-AI-Reader/
 
 
 **Automatically fetch, filter, and analyze latest arXiv papers using DeepSeek AI.**
