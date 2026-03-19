@@ -103,7 +103,7 @@ A lightweight, file-based system that monitors arXiv for new papers, intelligent
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/yourusername/Arxiv-AI-Reader.git
+git clone https://github.com/XTalentLab/Arxiv-AI-Reader.git
 cd Arxiv-AI-Reader
 
 # 2. Install dependencies
