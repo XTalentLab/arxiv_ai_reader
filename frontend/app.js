@@ -574,15 +574,31 @@ async function loadDailyPicks() {
         picks.forEach(paper => {
             const card = document.createElement('div');
             card.className = 'daily-pick-card';
-            card.addEventListener('click', () => openPaperModal(paper.id));
 
-            // 评分标签
-            let scoreHtml = '';
-            if (paper.relevance_score > 0) {
+            // 会议论文点击跳转到论文URL；arXiv论文打开详情弹窗
+            const isConference = paper.source === 'conference';
+            if (isConference) {
+                // 会议论文：如果有arXiv ID则打开详情，否则跳转到论文链接
+                const hasArxivId = paper.id && !paper.id.startsWith('conf_');
+                if (hasArxivId) {
+                    card.addEventListener('click', () => openPaperModal(paper.id));
+                } else if (paper.paper_url) {
+                    card.addEventListener('click', () => window.open(paper.paper_url, '_blank'));
+                    card.style.cursor = 'pointer';
+                }
+            } else {
+                card.addEventListener('click', () => openPaperModal(paper.id));
+            }
+
+            // 来源标签：会议论文显示会议名+年份，arXiv论文显示评分
+            let badgeHtml = '';
+            if (isConference && paper.conference) {
+                badgeHtml = `<span class="pick-score conf-badge">${escapeHtml(paper.conference)} ${paper.conference_year || ''}</span>`;
+            } else if (paper.relevance_score > 0) {
                 let scoreClass = 'low';
                 if (paper.relevance_score >= 7) scoreClass = 'high';
                 else if (paper.relevance_score >= 5) scoreClass = 'medium';
-                scoreHtml = `<span class="pick-score ${scoreClass}">${paper.relevance_score}/10</span>`;
+                badgeHtml = `<span class="pick-score ${scoreClass}">${paper.relevance_score}/10</span>`;
             }
 
             // 日期
@@ -590,31 +606,38 @@ async function loadDailyPicks() {
             if (paper.published_date) {
                 try {
                     const d = new Date(paper.published_date);
-                    dateStr = d.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' });
+                    // 会议论文只显示年份
+                    if (isConference) {
+                        dateStr = paper.conference_year ? `${paper.conference_year}` : d.getFullYear().toString();
+                    } else {
+                        dateStr = d.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' });
+                    }
                 } catch (_) {}
             }
 
-            // 关键词（最多显示3个）
+            // 关键词/标签（最多显示3个）
             let kwHtml = '';
-            if (paper.extracted_keywords && paper.extracted_keywords.length > 0) {
+            const tags = paper.tags && paper.tags.length > 0 ? paper.tags : (paper.extracted_keywords || []);
+            if (tags.length > 0) {
                 kwHtml = '<div class="pick-keywords">' +
-                    paper.extracted_keywords.slice(0, 3).map(
+                    tags.slice(0, 3).map(
                         kw => `<span class="kw">${escapeHtml(kw)}</span>`
                     ).join('') + '</div>';
             }
 
-            // 摘要文本
+            // 摘要文本：优先 one_line_summary，其次 abstract
             const summaryText = paper.one_line_summary
                 ? paper.one_line_summary.replace(/[#*_`]/g, '').substring(0, 120)
                 : (paper.abstract || '').substring(0, 120);
 
             card.innerHTML = `
-                ${scoreHtml}
+                ${badgeHtml}
                 <div class="pick-title">${escapeHtml(paper.title || '无标题')}</div>
                 <div class="pick-summary">${escapeHtml(summaryText)}</div>
                 <div class="pick-meta">
                     ${dateStr ? `<span>${dateStr}</span>` : ''}
                     ${paper.is_starred ? '<span>★</span>' : ''}
+                    ${isConference && paper.paper_type ? `<span>${escapeHtml(paper.paper_type)}</span>` : ''}
                 </div>
                 ${kwHtml}
             `;

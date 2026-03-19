@@ -223,6 +223,7 @@ backend/data/papers/*.json
 backend/data/papers/*.pdf
 data/papers/*.json
 data/papers/*.pdf
+data/conference_cache/
 
 # Config (keep template, ignore local)
 backend/data/config.json

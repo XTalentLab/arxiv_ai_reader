@@ -14,10 +14,15 @@
 
 import json
 import re
-from typing import List, Optional
+from pathlib import Path
+from typing import List, Optional, Tuple
 from dataclasses import dataclass, field, asdict
 
 import httpx
+
+# 缓存目录：项目根目录/data/conference_cache/
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_CACHE_DIR = _PROJECT_ROOT / "data" / "conference_cache"
 
 
 # 支持的会议配置
@@ -74,10 +79,13 @@ class ConferencePaperFetcher:
     会议论文获取器。
     从 GitHub (papercopilot/paperlists) 获取结构化 JSON 数据，
     比 HTML 爬取更稳定可靠。
+    支持本地文件缓存，避免重复抓取浪费网络和 token。
     """
 
     def __init__(self):
         self._client: Optional[httpx.AsyncClient] = None
+        # 确保缓存目录存在
+        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -108,21 +116,122 @@ class ConferencePaperFetcher:
             return False
         return year in conf["years"]
 
+    # -------- 缓存相关方法 --------
+
+    def _cache_path(self, conference: str, year: int) -> Path:
+        """返回缓存文件路径，例如 data/conference_cache/CVPR_2019.json"""
+        return _CACHE_DIR / f"{conference.upper()}_{year}.json"
+
+    def has_cache(self, conference: str, year: int) -> bool:
+        """检查是否存在本地缓存"""
+        return self._cache_path(conference, year).exists()
+
+    def _save_cache(self, conference: str, year: int, papers: List[ConferencePaper]):
+        """将论文列表序列化并保存到本地缓存文件"""
+        cache_file = self._cache_path(conference, year)
+        data = [p.to_dict() for p in papers]
+        with open(cache_file, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False)
+        print(f"  💾 已缓存 {len(papers)} 篇 {conference.upper()} {year} 论文 -> {cache_file.name}")
+
+    def _load_cache(self, conference: str, year: int) -> List[ConferencePaper]:
+        """从本地缓存文件加载论文列表"""
+        cache_file = self._cache_path(conference, year)
+        if not cache_file.exists():
+            return []
+        try:
+            with open(cache_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            papers = []
+            for item in data:
+                papers.append(ConferencePaper(
+                    title=item.get('title', ''),
+                    authors=item.get('authors', []),
+                    abstract=item.get('abstract', ''),
+                    url=item.get('url', ''),
+                    arxiv_id=item.get('arxiv_id', ''),
+                    conference=item.get('conference', ''),
+                    year=item.get('year', 0),
+                    paper_type=item.get('paper_type', ''),
+                ))
+            return papers
+        except Exception as e:
+            print(f"  ⚠️ 加载缓存失败 {cache_file}: {e}")
+            return []
+
+    def list_cached_conferences(self) -> List[Tuple[str, int, int]]:
+        """
+        列出所有已缓存的会议论文。
+        返回: [(conference, year, paper_count), ...]
+        """
+        result = []
+        if not _CACHE_DIR.exists():
+            return result
+        for f in _CACHE_DIR.glob("*.json"):
+            try:
+                parts = f.stem.split('_')
+                if len(parts) == 2:
+                    conf, year_str = parts
+                    year = int(year_str)
+                    # 快速读取论文数量
+                    with open(f, 'r', encoding='utf-8') as fh:
+                        data = json.load(fh)
+                    result.append((conf, year, len(data)))
+            except Exception:
+                continue
+        return sorted(result, key=lambda x: (x[0], x[1]), reverse=True)
+
+    def load_random_conference_papers(self, count: int = 10) -> List[ConferencePaper]:
+        """
+        从所有已缓存的会议论文中随机抽取若干篇，用于每日推荐。
+        随机力度大：跨越所有缓存的会议和年份。
+        """
+        import random
+        all_papers = []
+        if not _CACHE_DIR.exists():
+            return []
+        for f in _CACHE_DIR.glob("*.json"):
+            try:
+                with open(f, 'r', encoding='utf-8') as fh:
+                    data = json.load(fh)
+                for item in data:
+                    all_papers.append(ConferencePaper(
+                        title=item.get('title', ''),
+                        authors=item.get('authors', []),
+                        abstract=item.get('abstract', ''),
+                        url=item.get('url', ''),
+                        arxiv_id=item.get('arxiv_id', ''),
+                        conference=item.get('conference', ''),
+                        year=item.get('year', 0),
+                        paper_type=item.get('paper_type', ''),
+                    ))
+            except Exception:
+                continue
+        if not all_papers:
+            return []
+        pick_count = min(count, len(all_papers))
+        return random.sample(all_papers, pick_count)
+
+    # -------- 抓取方法（带缓存） --------
+
     async def fetch_papers(
         self,
         conference: str,
         year: int,
         on_progress=None,
         accepted_only: bool = True,
+        force_refresh: bool = False,
     ) -> List[ConferencePaper]:
         """
-        从 GitHub 获取指定会议和年份的论文列表（结构化 JSON）。
+        获取指定会议和年份的论文列表。
+        优先从本地缓存加载；缓存不存在时从 GitHub 抓取并自动缓存。
 
         Args:
             conference: 会议名 (CVPR/ICCV/ECCV/ICLR/ICML)
             year: 年份
             on_progress: 进度回调 async callable(message: str)
             accepted_only: 是否只返回 accepted 论文（过滤 Reject/Withdraw）
+            force_refresh: 强制从 GitHub 重新抓取（忽略缓存）
 
         Returns:
             论文列表
@@ -131,6 +240,16 @@ class ConferencePaperFetcher:
         conf = SUPPORTED_CONFERENCES.get(conf_upper)
         if not conf:
             raise ValueError(f"不支持的会议: {conference}。支持: {', '.join(SUPPORTED_CONFERENCES.keys())}")
+
+        # 优先使用缓存
+        if not force_refresh and self.has_cache(conf_upper, year):
+            if on_progress:
+                await on_progress(f"从本地缓存加载 {conf_upper} {year} 论文数据...")
+            cached = self._load_cache(conf_upper, year)
+            if cached:
+                if on_progress:
+                    await on_progress(f"从缓存加载了 {len(cached)} 篇 {conf_upper} {year} 论文")
+                return cached
 
         slug = conf["slug"]
         # 从 GitHub 原始数据获取 JSON
@@ -218,5 +337,9 @@ class ConferencePaperFetcher:
 
         if on_progress:
             await on_progress(f"共获取 {len(papers)} 篇 {conf_upper} {year} accepted 论文")
+
+        # 自动缓存抓取结果
+        if papers:
+            self._save_cache(conf_upper, year, papers)
 
         return papers

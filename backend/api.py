@@ -44,6 +44,7 @@ from fetcher import ArxivFetcher
 from storage import DATA_ROOT
 from analyzer import DeepSeekAnalyzer, _is_paper_from_today
 from default_config import DEFAULT_CONFIG
+from conference import ConferencePaperFetcher, SUPPORTED_CONFERENCES
 
 # Scan all papers (no limit)
 SCAN_ALL = 999999
@@ -166,6 +167,7 @@ def _save_paper_cb(paper):
 
 analyzer = DeepSeekAnalyzer(save_paper=_save_paper_cb)
 config_path = DATA_ROOT / "config.json"
+_conference_fetcher = ConferencePaperFetcher()  # 会议论文获取器（带缓存）
 
 # Serve frontend static files FIRST (before other routes)
 # Try frontend_dist first (built assets), fallback to frontend (source)
@@ -230,50 +232,83 @@ async def health_check():
 @app.get("/papers/daily_picks", response_model=List[dict])
 async def daily_picks(count: int = 10):
     """
-    随机推荐历史文章。
-    每次请求都随机返回不同的推荐结果，让用户刷新即可看到新内容。
-    仅从已分析且相关的文章中选取。
+    每日随机推荐论文。
+    不围绕 keywords 过滤，从所有论文（包括历史论文和会议论文缓存）中随机抽取。
+    随机力度大：可推荐几年前的论文，不局限于最近几天。
+    会议论文来源于已缓存的会议论文列表（papercopilot）。
     """
     import random
 
-    # 从metadata cache中获取所有已分析的文章
-    def _get_picks():
+    # 1. 从 arXiv 论文库中获取候选（不再要求 is_relevant，只排除隐藏的）
+    def _get_arxiv_candidates():
         meta_list = fetcher.store.list_papers_metadata(max_files=SCAN_ALL, check_stale=False)
-        # 筛选：已分析且相关、未隐藏的文章
+        # 不再按 keywords 过滤，只排除隐藏的论文
         candidates = [
             m for m in meta_list
-            if m.get("is_relevant") is True
-            and not m.get("is_hidden", False)
-            and m.get("one_line_summary", "").strip()
+            if not m.get("is_hidden", False)
         ]
-        if not candidates:
-            return []
-        # 每次请求随机推荐，不固定种子
-        pick_count = min(count, len(candidates))
-        picks = random.sample(candidates, pick_count)
-        return picks
+        return candidates
 
-    picks = await asyncio.to_thread(_get_picks)
+    arxiv_candidates = await asyncio.to_thread(_get_arxiv_candidates)
 
-    # 返回与 /papers 相同格式的字段
+    # 2. 从会议论文缓存中获取候选（随机力度大，跨越所有年份和会议）
+    conf_picks_count = max(count // 2, 3)  # 至少一半来自会议论文
+    conf_papers = await asyncio.to_thread(_conference_fetcher.load_random_conference_papers, conf_picks_count * 3)
+
+    # 3. 合并候选池并随机抽取
     results = []
-    for m in picks:
-        results.append({
-            "id": m.get("id", ""),
-            "title": m.get("title", ""),
-            "authors": m.get("authors", []),
-            "abstract": m.get("abstract", ""),
-            "published_date": m.get("published_date", ""),
-            "is_relevant": m.get("is_relevant"),
-            "relevance_score": m.get("relevance_score", 0),
-            "one_line_summary": m.get("one_line_summary", ""),
-            "extracted_keywords": m.get("extracted_keywords", []),
-            "is_starred": m.get("is_starred", False),
-            "is_hidden": m.get("is_hidden", False),
-            "star_category": m.get("star_category", "Other"),
-            "tags": m.get("tags", []),
-        })
-    return results
+
+    # 从 arXiv 候选中随机抽取（不局限于最近，全部随机）
+    arxiv_pick_count = min(count - conf_picks_count, len(arxiv_candidates))
+    if arxiv_pick_count > 0 and arxiv_candidates:
+        arxiv_picks = random.sample(arxiv_candidates, arxiv_pick_count)
+        for m in arxiv_picks:
+            results.append({
+                "id": m.get("id", ""),
+                "title": m.get("title", ""),
+                "authors": m.get("authors", []),
+                "abstract": m.get("abstract", ""),
+                "published_date": m.get("published_date", ""),
+                "is_relevant": m.get("is_relevant"),
+                "relevance_score": m.get("relevance_score", 0),
+                "one_line_summary": m.get("one_line_summary", ""),
+                "extracted_keywords": m.get("extracted_keywords", []),
+                "is_starred": m.get("is_starred", False),
+                "is_hidden": m.get("is_hidden", False),
+                "star_category": m.get("star_category", "Other"),
+                "tags": m.get("tags", []),
+                "source": "arxiv",
+            })
+
+    # 从会议论文中随机抽取
+    actual_conf_count = min(conf_picks_count, len(conf_papers))
+    if actual_conf_count > 0:
+        conf_sample = random.sample(conf_papers, actual_conf_count)
+        for cp in conf_sample:
+            results.append({
+                "id": cp.arxiv_id or f"conf_{cp.conference}_{cp.year}_{hash(cp.title) % 100000}",
+                "title": cp.title,
+                "authors": cp.authors,
+                "abstract": cp.abstract,
+                "published_date": f"{cp.year}-01-01",
+                "is_relevant": None,
+                "relevance_score": 0,
+                "one_line_summary": "",
+                "extracted_keywords": [],
+                "is_starred": False,
+                "is_hidden": False,
+                "star_category": "",
+                "tags": [cp.conference, str(cp.year)],
+                "source": "conference",
+                "conference": cp.conference,
+                "conference_year": cp.year,
+                "paper_type": cp.paper_type,
+                "paper_url": cp.url,
+            })
+
+    # 打乱顺序，让 arXiv 和会议论文混合展示
+    random.shuffle(results)
+    return results[:count]
 
 
 @app.get("/papers", response_model=List[dict])
@@ -1577,11 +1612,9 @@ async def reprocess_negative_keyword_blocked_endpoint(background_tasks: Backgrou
 # ============ Scholar & Conference Explorer ============
 
 from scholar import GoogleScholarScraper
-from conference import ConferencePaperFetcher, SUPPORTED_CONFERENCES
 
-# 全局实例
+# 全局实例（_conference_fetcher 已在上方初始化）
 _scholar_scraper = GoogleScholarScraper()
-_conference_fetcher = ConferencePaperFetcher()
 
 
 class ScholarAnalyzeRequest(BaseModel):
@@ -1593,18 +1626,42 @@ class ScholarAnalyzeRequest(BaseModel):
 class ConferenceAnalyzeRequest(BaseModel):
     conference: str          # 会议名 (CVPR/ICCV/ECCV/ICLR/ICML)
     year: int                # 年份
+    force_refresh: bool = False  # 强制从GitHub重新抓取（忽略缓存）
 
 
 @app.get("/conference/info")
 async def get_conference_info():
-    """获取支持的会议列表和可用年份"""
+    """获取支持的会议列表、可用年份和缓存状态"""
+    # 获取已缓存的会议信息
+    cached_list = _conference_fetcher.list_cached_conferences()
+    cached_map = {(c, y): cnt for c, y, cnt in cached_list}
+
     result = {}
     for conf_name, conf_data in SUPPORTED_CONFERENCES.items():
+        years_info = []
+        for y in sorted(conf_data["years"], reverse=True):
+            cached_count = cached_map.get((conf_name, y), 0)
+            years_info.append({
+                "year": y,
+                "cached": cached_count > 0,
+                "cached_count": cached_count,
+            })
         result[conf_name] = {
             "name": conf_data["name"],
             "years": sorted(conf_data["years"], reverse=True),
+            "years_detail": years_info,
         }
     return result
+
+
+@app.get("/conference/cache")
+async def get_conference_cache_list():
+    """获取所有已缓存的会议论文列表"""
+    cached = await asyncio.to_thread(_conference_fetcher.list_cached_conferences)
+    return [
+        {"conference": c, "year": y, "paper_count": cnt}
+        for c, y, cnt in cached
+    ]
 
 
 @app.post("/scholar/analyze")
@@ -1758,6 +1815,7 @@ async def conference_analyze_stream(request: ConferenceAnalyzeRequest):
             papers = await _conference_fetcher.fetch_papers(
                 conf_upper, request.year,
                 on_progress=on_progress,
+                force_refresh=request.force_refresh,
             )
 
             # 推送队列中的进度消息
