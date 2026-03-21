@@ -67,12 +67,18 @@
     <div class="search-container">
         <div class="container">
             <div class="search-bar-wrapper" id="searchBarWrapper">
-                <input 
-                    type="text" 
-                    id="searchInput" 
-                    class="search-input" 
-                    placeholder="搜索论文、ai: 语义搜索，或拖入 PDF 文件..."
+                <input
+                    type="text"
+                    id="searchInput"
+                    class="search-input"
+                    placeholder="搜索论文标题/关键词，或输入 arXiv ID，或 ai: 语义搜索..."
                 >
+                <!-- 隐藏的文件选择器 -->
+                <input type="file" id="pdfFileInput" accept=".pdf" style="display:none;">
+                <!-- PDF 上传按钮 -->
+                <button id="pdfUploadBtn" class="config-icon-btn" title="上传本地 PDF 文件分析" style="margin-left:4px;flex-shrink:0;">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="12" x2="12" y2="18"/><line x1="9" y1="15" x2="15" y2="15"/></svg>
+                </button>
                 <div class="search-filters" id="searchFilters">
                     <select id="sortSelect" class="sort-select">
                         <option value="relevance">按相关性排序</option>
@@ -129,12 +135,24 @@
     <main class="container">
         <!-- 每日推荐区域 -->
         <div id="dailyPicksSection" class="daily-picks-section" style="display: none;">
-            <div class="daily-picks-header">
-                <h2 class="daily-picks-title">每日推荐</h2>
-                <span class="daily-picks-date" id="dailyPicksDate"></span>
+            <!-- 子版块1: ArXiv 近期高相关论文 -->
+            <div id="arxivPicksSubSection">
+                <div class="daily-picks-header">
+                    <h2 class="daily-picks-title">📰 今日 ArXiv 推荐</h2>
+                    <span class="daily-picks-date" id="dailyPicksDate"></span>
+                </div>
+                <div class="daily-picks-scroll" id="arxivPicksContainer">
+                    <!-- ArXiv 推荐卡片 -->
+                </div>
             </div>
-            <div class="daily-picks-scroll" id="dailyPicksContainer">
-                <!-- 推荐卡片通过JS动态插入 -->
+            <!-- 子版块2: 往期会议经典论文 -->
+            <div id="confPicksSubSection" style="margin-top: 20px;">
+                <div class="daily-picks-header">
+                    <h2 class="daily-picks-title">🏛️ 往期经典论文</h2>
+                </div>
+                <div class="daily-picks-scroll" id="confPicksContainer">
+                    <!-- 会议论文推荐卡片 -->
+                </div>
             </div>
         </div>
 
@@ -337,12 +355,31 @@
             <div class="modal-body">
                 <!-- Explorer 内部 Tab 切换 -->
                 <div class="explorer-tabs">
-                    <button class="explorer-tab active" data-explorer-tab="scholar">🎓 学者搜索</button>
+                    <button class="explorer-tab active" data-explorer-tab="arxiv">🔍 ArXiv检索</button>
+                    <button class="explorer-tab" data-explorer-tab="scholar">🎓 学者搜索</button>
                     <button class="explorer-tab" data-explorer-tab="conference">📋 会议论文</button>
                 </div>
 
+                <!-- ArXiv 检索面板 -->
+                <div id="explorerArxivPanel" class="explorer-panel active">
+                    <div class="explorer-form">
+                        <div class="form-group">
+                            <label>关键词搜索 arXiv</label>
+                            <div style="display:flex;gap:8px;">
+                                <input type="text" id="arxivSearchInput" class="input" placeholder="e.g. diffusion model video generation" style="flex:1;">
+                                <button id="arxivSearchBtn" class="btn btn-primary" style="white-space:nowrap;">搜索</button>
+                            </div>
+                            <div style="font-size:12px;color:var(--text-muted);margin-top:4px;">也可直接输入 arXiv ID（如 2312.04567）</div>
+                        </div>
+                    </div>
+                    <div id="arxivSearchResults" class="explorer-results" style="display:none;">
+                        <div id="arxivSearchProgress" class="explorer-progress"></div>
+                        <div id="arxivPaperList" class="explorer-paper-list"></div>
+                    </div>
+                </div>
+
                 <!-- 学者搜索面板 -->
-                <div id="explorerScholarPanel" class="explorer-panel active">
+                <div id="explorerScholarPanel" class="explorer-panel">
                     <div class="explorer-form">
                         <div class="form-group">
                             <label>Google Scholar 个人主页 URL</label>

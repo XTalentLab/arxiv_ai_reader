@@ -100,6 +100,23 @@ class DeepSeekAnalyzer:
             "maximum context length" in error_str.lower() or
             "invalid_request_error" in error_str.lower() and "token" in error_str.lower()
         )
+
+    def _is_fatal_api_error(self, error: Exception) -> bool:
+        """
+        Check if error is fatal (should NOT be retried).
+        401: invalid API key, 402: insufficient balance, 403: forbidden.
+        """
+        status_code = getattr(error, 'status_code', None)
+        if status_code in (401, 402, 403):
+            return True
+        error_str = str(error)
+        return (
+            "Error code: 401" in error_str or
+            "Error code: 402" in error_str or
+            "Error code: 403" in error_str or
+            "Insufficient Balance" in error_str or
+            "invalid api key" in error_str.lower()
+        )
     
     def _truncate_cache_prefix(self, cache_prefix: str, truncate_ratio: float = 0.15) -> str:
         """
@@ -579,6 +596,10 @@ Search the paper corpus. Call multiple search tools in parallel if needed. Merge
                 return paper
             
             except Exception as e:
+                if self._is_fatal_api_error(e):
+                    print(f"  Stage 1 FATAL error for {paper.id} (no retry): {e}")
+                    paper.is_relevant = None
+                    return paper
                 if attempt < max_retries - 1:
                     # Exponential backoff: 1s, 2s
                     wait_time = 2 ** attempt
@@ -588,7 +609,7 @@ Search the paper corpus. Call multiple search tools in parallel if needed. Merge
                     # Final failure - do NOT save
                     print(f"  Stage 1 FAILED after {max_retries} attempts for {paper.id}: {e}")
                     paper.is_relevant = None  # Mark as unprocessed
-        
+
         return paper
     
     async def stage2_qa(self, paper: Paper, config: Config) -> Paper:
@@ -1010,6 +1031,10 @@ Paper Content:
                         return  # Don't save on failure
                 else:
                     # Not a token limit error, use normal retry logic
+                    if self._is_fatal_api_error(e):
+                        print(f"  Stream FATAL API error (no retry): {e}")
+                        yield {"type": "error", "chunk": f"❌ API error (no retry): {str(e)}\n"}
+                        return
                     if attempt < max_retries - 1:
                         wait_time = 2 ** attempt
                         print(f"  Stream retry {attempt + 1}/{max_retries} after {wait_time}s: {e}")
@@ -1410,6 +1435,9 @@ Paper Content:
                         return (None, current_cache_prefix)
                 else:
                     # Not a token limit error, use normal retry logic
+                    if self._is_fatal_api_error(e):
+                        print(f"  FATAL API error (no retry): {e}")
+                        return (None, current_cache_prefix)
                     if attempt < max_retries - 1:
                         wait_time = 2 ** attempt
                         print(f"  Retry {attempt + 1}/{max_retries} after {wait_time}s: {e}")

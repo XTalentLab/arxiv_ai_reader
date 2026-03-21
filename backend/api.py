@@ -24,6 +24,7 @@ if _env_path.exists():
 
 import asyncio
 import re
+import httpx
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, BackgroundTasks, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -229,86 +230,158 @@ async def health_check():
     return {"message": "arXiv Paper Fetcher API", "status": "running"}
 
 
-@app.get("/papers/daily_picks", response_model=List[dict])
+async def _generate_conf_ai_content(papers, config) -> list:
+    """
+    为会议论文批量生成 AI 关键词和一句话摘要（已有缓存则跳过）。
+    生成结果写回缓存文件，避免重复消耗 token。
+    返回带 ai_keywords / ai_summary 的 dict 列表。
+    """
+    import json as _json
+
+    async def _gen_one(cp):
+        if cp.ai_keywords and cp.ai_summary:
+            return cp  # 已有缓存，直接返回
+        content = cp.abstract.strip() if cp.abstract.strip() else "(Abstract not available)"
+        prompt = (
+            f"Paper title: {cp.title}\n"
+            f"Abstract: {content[:800]}\n\n"
+            "Generate for this paper:\n"
+            "1. 3-5 English technical keywords\n"
+            "2. One-line Chinese summary (~30 characters, objective)\n\n"
+            'Respond with JSON only: {"keywords": ["k1", "k2", ...], "summary": "..."}'
+        )
+        try:
+            resp = await analyzer.client.chat.completions.create(
+                model=config.model,
+                messages=[
+                    {"role": "system", "content": "You are a precise academic paper analyst. Respond only with valid JSON."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.3,
+                max_tokens=150,
+                response_format={"type": "json_object"},
+            )
+            data = _json.loads(resp.choices[0].message.content.strip())
+            cp.ai_keywords = data.get("keywords", [])
+            cp.ai_summary = data.get("summary", "")
+            # 写回缓存
+            if cp.conference and cp.year:
+                await asyncio.to_thread(
+                    _conference_fetcher.update_paper_ai_content,
+                    cp.conference, cp.year, cp.title, cp.ai_keywords, cp.ai_summary,
+                )
+        except Exception as e:
+            print(f"  [conf_ai] Failed for '{cp.title[:40]}': {e}")
+        return cp
+
+    updated = await asyncio.gather(*[_gen_one(cp) for cp in papers], return_exceptions=False)
+    return updated
+
+
+@app.get("/papers/daily_picks")
 async def daily_picks(count: int = 10):
     """
-    每日随机推荐论文。
-    不围绕 keywords 过滤，从所有论文（包括历史论文和会议论文缓存）中随机抽取。
-    随机力度大：可推荐几年前的论文，不局限于最近几天。
-    会议论文来源于已缓存的会议论文列表（papercopilot）。
+    每日推荐，分两个子版块：
+    - arxiv: 近7天内与预设关键词高度相关的最新论文（按评分排序）
+    - conference: 往期经典会议论文随机推荐（多样性保证），附 LLM 生成的关键词和摘要
     """
-    import random
+    from datetime import datetime, timedelta, timezone
 
-    # 1. 从 arXiv 论文库中获取候选（不再要求 is_relevant，只排除隐藏的）
-    def _get_arxiv_candidates():
+    config = await asyncio.to_thread(Config.load, config_path)
+
+    # ── 子版块1: ArXiv 近期高相关论文 ──────────────────────────────────────
+    def _get_arxiv_picks():
         meta_list = fetcher.store.list_papers_metadata(max_files=SCAN_ALL, check_stale=False)
-        # 不再按 keywords 过滤，只排除隐藏的论文
-        candidates = [
-            m for m in meta_list
-            if not m.get("is_hidden", False)
-        ]
-        return candidates
+        cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+        results = []
+        for m in meta_list:
+            if m.get("is_hidden", False):
+                continue
+            if not m.get("is_relevant"):
+                continue
+            score = m.get("relevance_score", 0) or 0
+            if score < 6:
+                continue
+            # 按发布日期过滤近7天
+            pub = m.get("published_date", "")
+            try:
+                d = datetime.fromisoformat(pub.replace("Z", "+00:00"))
+                if d.tzinfo is None:
+                    d = d.replace(tzinfo=timezone.utc)
+                if d < cutoff:
+                    continue
+            except Exception:
+                continue
+            results.append(m)
+        # 按评分降序，取 top count
+        results.sort(key=lambda x: x.get("relevance_score", 0), reverse=True)
+        return results[:count]
 
-    arxiv_candidates = await asyncio.to_thread(_get_arxiv_candidates)
+    arxiv_meta = await asyncio.to_thread(_get_arxiv_picks)
+    arxiv_picks = [
+        {
+            "id": m.get("id", ""),
+            "title": m.get("title", ""),
+            "authors": m.get("authors", []),
+            "abstract": m.get("abstract", ""),
+            "published_date": m.get("published_date", ""),
+            "relevance_score": m.get("relevance_score", 0),
+            "one_line_summary": m.get("one_line_summary", ""),
+            "extracted_keywords": m.get("extracted_keywords", []),
+            "tags": m.get("tags", []),
+            "is_starred": m.get("is_starred", False),
+            "source": "arxiv",
+        }
+        for m in arxiv_meta
+    ]
 
-    # 2. 从会议论文缓存中获取候选（随机力度大，跨越所有年份和会议）
-    conf_picks_count = max(count // 2, 3)  # 至少一半来自会议论文
-    conf_papers = await asyncio.to_thread(_conference_fetcher.load_random_conference_papers, conf_picks_count * 3)
+    # ── 子版块2: 往期会议论文随机推荐 ──────────────────────────────────────
+    conf_papers = await asyncio.to_thread(
+        _conference_fetcher.load_random_diverse_conference_papers, count
+    )
 
-    # 3. 合并候选池并随机抽取
-    results = []
+    # 若缓存为空，后台自动下载几个会议年份
+    if not conf_papers:
+        async def _seed_conference_cache():
+            import random as _r
+            candidates = (
+                [("CVPR", y) for y in [2022, 2023, 2021, 2020, 2019, 2018]] +
+                [("ICLR", y) for y in [2023, 2022, 2021, 2020]] +
+                [("ICCV", y) for y in [2023, 2021, 2019]]
+            )
+            for conf_name, conf_year in _r.sample(candidates, min(4, len(candidates))):
+                if not _conference_fetcher.has_cache(conf_name, conf_year):
+                    try:
+                        await _conference_fetcher.fetch_papers(conf_name, conf_year)
+                        print(f"  [daily_picks] 自动缓存 {conf_name} {conf_year}")
+                    except Exception as e:
+                        print(f"  [daily_picks] 缓存 {conf_name} {conf_year} 失败: {e}")
+        asyncio.create_task(_seed_conference_cache())
 
-    # 从 arXiv 候选中随机抽取（不局限于最近，全部随机）
-    arxiv_pick_count = min(count - conf_picks_count, len(arxiv_candidates))
-    if arxiv_pick_count > 0 and arxiv_candidates:
-        arxiv_picks = random.sample(arxiv_candidates, arxiv_pick_count)
-        for m in arxiv_picks:
-            results.append({
-                "id": m.get("id", ""),
-                "title": m.get("title", ""),
-                "authors": m.get("authors", []),
-                "abstract": m.get("abstract", ""),
-                "published_date": m.get("published_date", ""),
-                "is_relevant": m.get("is_relevant"),
-                "relevance_score": m.get("relevance_score", 0),
-                "one_line_summary": m.get("one_line_summary", ""),
-                "extracted_keywords": m.get("extracted_keywords", []),
-                "is_starred": m.get("is_starred", False),
-                "is_hidden": m.get("is_hidden", False),
-                "star_category": m.get("star_category", "Other"),
-                "tags": m.get("tags", []),
-                "source": "arxiv",
-            })
+    # 为没有 AI 内容的会议论文生成关键词+摘要
+    if conf_papers:
+        conf_papers = await _generate_conf_ai_content(conf_papers, config)
 
-    # 从会议论文中随机抽取
-    actual_conf_count = min(conf_picks_count, len(conf_papers))
-    if actual_conf_count > 0:
-        conf_sample = random.sample(conf_papers, actual_conf_count)
-        for cp in conf_sample:
-            results.append({
-                "id": cp.arxiv_id or f"conf_{cp.conference}_{cp.year}_{hash(cp.title) % 100000}",
-                "title": cp.title,
-                "authors": cp.authors,
-                "abstract": cp.abstract,
-                "published_date": f"{cp.year}-01-01",
-                "is_relevant": None,
-                "relevance_score": 0,
-                "one_line_summary": "",
-                "extracted_keywords": [],
-                "is_starred": False,
-                "is_hidden": False,
-                "star_category": "",
-                "tags": [cp.conference, str(cp.year)],
-                "source": "conference",
-                "conference": cp.conference,
-                "conference_year": cp.year,
-                "paper_type": cp.paper_type,
-                "paper_url": cp.url,
-            })
+    conf_picks = [
+        {
+            "id": cp.arxiv_id or f"conf_{cp.conference}_{cp.year}_{hash(cp.title) % 100000}",
+            "title": cp.title,
+            "authors": cp.authors,
+            "abstract": cp.abstract,
+            "published_date": f"{cp.year}-01-01",
+            "ai_keywords": cp.ai_keywords,
+            "ai_summary": cp.ai_summary,
+            "is_starred": False,
+            "source": "conference",
+            "conference": cp.conference,
+            "conference_year": cp.year,
+            "paper_type": cp.paper_type,
+            "paper_url": cp.url,
+        }
+        for cp in conf_papers
+    ]
 
-    # 打乱顺序，让 arXiv 和会议论文混合展示
-    random.shuffle(results)
-    return results[:count]
+    return {"arxiv": arxiv_picks, "conference": conf_picks}
 
 
 @app.get("/papers", response_model=List[dict])
@@ -808,9 +881,18 @@ def _parse_pdf_to_paper(file_content: bytes, filename: str) -> Paper:
         t = page.extract_text()
         if t:
             full_text += t + "\n"
-    
+
     if not full_text.strip():
         raise ValueError("PDF contains no extractable text")
+
+    # Fix surrogate pairs from PDF math fonts (e.g. \ud835\udc00 → 𝐀 U+1D400).
+    # Encode as UTF-16 with surrogatepass (preserves surrogate bytes), then decode back
+    # so surrogate pairs are resolved to proper Unicode math codepoints.
+    # Fall back to replacement only if there are lone (unpaired) surrogates.
+    try:
+        full_text = full_text.encode("utf-16", "surrogatepass").decode("utf-16")
+    except Exception:
+        full_text = full_text.encode("utf-8", "surrogatepass").decode("utf-8", "replace")
     
     lines = [ln.strip() for ln in full_text.split("\n") if ln.strip()]
     title = Path(filename).stem.replace("_", " ") if filename else "Uploaded Paper"
@@ -1260,6 +1342,53 @@ def _matches_advanced_filter(item, hide_irrelevant, hide_starred, from_date, to_
         except (ValueError, TypeError):
             pass
     return True
+
+
+@app.get("/search/arxiv_query")
+async def search_arxiv_query(q: str, max_results: int = 15):
+    """
+    直接搜索 arXiv.org（不保存到本地），返回论文预览列表。
+    用于 Explorer 的 ArXiv 检索 tab。
+    """
+    import feedparser as _fp
+    from urllib.parse import quote as _quote
+
+    q = q.strip()
+    if not q:
+        return []
+
+    api_url = (
+        f"https://export.arxiv.org/api/query?search_query=all:{_quote(q)}"
+        f"&start=0&max_results={max_results}&sortBy=relevance&sortOrder=descending"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+            resp = await client.get(api_url)
+            resp.raise_for_status()
+        feed = _fp.parse(resp.text)
+        results = []
+        for entry in getattr(feed, "entries", []):
+            if not hasattr(entry, "id"):
+                continue
+            arxiv_id = (
+                entry.id.split("/abs/")[-1]
+                if "/abs/" in entry.id
+                else entry.id.split("/")[-1]
+            )
+            authors = [a.get("name", "") for a in getattr(entry, "authors", [])]
+            already_saved = fetcher.store.any_version_exists(arxiv_id)[0]
+            results.append({
+                "id": arxiv_id,
+                "title": getattr(entry, "title", "").replace("\n", " ").strip(),
+                "authors": authors,
+                "abstract": getattr(entry, "summary", "").replace("\n", " ").strip(),
+                "published_date": getattr(entry, "published", ""),
+                "url": f"https://arxiv.org/abs/{arxiv_id}",
+                "already_saved": already_saved,
+            })
+        return results
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"ArXiv 搜索失败: {e}")
 
 
 @app.get("/search")

@@ -545,104 +545,131 @@ function switchTab(tab) {
     }
 }
 
-// 加载每日推荐文章
+// 渲染单张推荐卡片，arxiv 和 conference 通用
+function _renderPickCard(paper) {
+    const card = document.createElement('div');
+    card.className = 'daily-pick-card';
+    const isConference = paper.source === 'conference';
+
+    // 点击行为
+    if (isConference) {
+        const hasArxivId = paper.id && !paper.id.startsWith('conf_');
+        if (hasArxivId) {
+            card.addEventListener('click', async () => {
+                // 会议论文的 arXiv 版本可能未在本地缓存，先通过 /search 触发抓取再打开
+                try {
+                    const r = await fetch(`${API_BASE}/search?q=${encodeURIComponent(paper.id)}`);
+                    if (r.ok) {
+                        const results = await r.json();
+                        if (results.length > 0) {
+                            openPaperModal(paper.id);
+                            return;
+                        }
+                    }
+                } catch (_) {}
+                // fallback: 直接跳到论文链接
+                if (paper.paper_url) window.open(paper.paper_url, '_blank');
+            });
+            card.style.cursor = 'pointer';
+        } else if (paper.paper_url) {
+            card.addEventListener('click', () => window.open(paper.paper_url, '_blank'));
+            card.style.cursor = 'pointer';
+        }
+    } else {
+        card.addEventListener('click', () => openPaperModal(paper.id));
+    }
+
+    // 徽章
+    let badgeHtml = '';
+    if (isConference && paper.conference) {
+        badgeHtml = `<span class="pick-score conf-badge">${escapeHtml(paper.conference)} ${paper.conference_year || ''}</span>`;
+    } else if (paper.relevance_score > 0) {
+        let scoreClass = paper.relevance_score >= 7 ? 'high' : paper.relevance_score >= 5 ? 'medium' : 'low';
+        badgeHtml = `<span class="pick-score ${scoreClass}">${paper.relevance_score}/10</span>`;
+    }
+
+    // 日期
+    let dateStr = '';
+    if (paper.published_date) {
+        try {
+            const d = new Date(paper.published_date);
+            dateStr = isConference
+                ? (paper.conference_year ? `${paper.conference_year}` : d.getFullYear().toString())
+                : d.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' });
+        } catch (_) {}
+    }
+
+    // 关键词：arxiv 用 extracted_keywords/tags，会议用 ai_keywords
+    const kwList = isConference
+        ? (paper.ai_keywords || [])
+        : (paper.extracted_keywords?.length ? paper.extracted_keywords : (paper.tags || []));
+    const kwHtml = kwList.length > 0
+        ? '<div class="pick-keywords">' + kwList.slice(0, 4).map(k => `<span class="kw">${escapeHtml(k)}</span>`).join('') + '</div>'
+        : '';
+
+    // 摘要：arxiv 用 one_line_summary，会议用 ai_summary，fallback abstract
+    const summaryText = isConference
+        ? (paper.ai_summary || paper.abstract || '').substring(0, 120)
+        : (paper.one_line_summary || paper.abstract || '').replace(/[#*_`]/g, '').substring(0, 120);
+
+    card.innerHTML = `
+        ${badgeHtml}
+        <div class="pick-title">${escapeHtml(paper.title || '无标题')}</div>
+        <div class="pick-summary">${escapeHtml(summaryText)}</div>
+        <div class="pick-meta">
+            ${dateStr ? `<span>${dateStr}</span>` : ''}
+            ${paper.is_starred ? '<span>★</span>' : ''}
+            ${isConference && paper.paper_type ? `<span>${escapeHtml(paper.paper_type)}</span>` : ''}
+        </div>
+        ${kwHtml}
+    `;
+    return card;
+}
+
+// 加载每日推荐文章（分两个子版块）
 async function loadDailyPicks() {
     const section = document.getElementById('dailyPicksSection');
-    const container = document.getElementById('dailyPicksContainer');
+    const arxivContainer = document.getElementById('arxivPicksContainer');
+    const confContainer = document.getElementById('confPicksContainer');
     const dateEl = document.getElementById('dailyPicksDate');
-    if (!section || !container) return;
+    if (!section || !arxivContainer || !confContainer) return;
 
     try {
         const response = await fetch(`${API_BASE}/papers/daily_picks?count=10`);
         if (!response.ok) return;
-        const picks = await response.json();
+        const data = await response.json();
 
-        // 无推荐文章则不显示
-        if (!picks || picks.length === 0) {
+        const arxivPicks = data.arxiv || [];
+        const confPicks = data.conference || [];
+
+        if (arxivPicks.length === 0 && confPicks.length === 0) {
             section.style.display = 'none';
             return;
         }
 
-        // 显示当天日期
+        // 日期
         const today = new Date();
-        dateEl.textContent = today.toLocaleDateString('zh-CN', {
-            year: 'numeric', month: 'long', day: 'numeric'
-        });
+        if (dateEl) dateEl.textContent = today.toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric' });
 
-        // 渲染推荐卡片
-        container.innerHTML = '';
-        picks.forEach(paper => {
-            const card = document.createElement('div');
-            card.className = 'daily-pick-card';
+        // 渲染 ArXiv 子版块
+        arxivContainer.innerHTML = '';
+        const arxivSub = document.getElementById('arxivPicksSubSection');
+        if (arxivPicks.length > 0) {
+            arxivPicks.forEach(p => arxivContainer.appendChild(_renderPickCard(p)));
+            if (arxivSub) arxivSub.style.display = '';
+        } else {
+            if (arxivSub) arxivSub.style.display = 'none';
+        }
 
-            // 会议论文点击跳转到论文URL；arXiv论文打开详情弹窗
-            const isConference = paper.source === 'conference';
-            if (isConference) {
-                // 会议论文：如果有arXiv ID则打开详情，否则跳转到论文链接
-                const hasArxivId = paper.id && !paper.id.startsWith('conf_');
-                if (hasArxivId) {
-                    card.addEventListener('click', () => openPaperModal(paper.id));
-                } else if (paper.paper_url) {
-                    card.addEventListener('click', () => window.open(paper.paper_url, '_blank'));
-                    card.style.cursor = 'pointer';
-                }
-            } else {
-                card.addEventListener('click', () => openPaperModal(paper.id));
-            }
-
-            // 来源标签：会议论文显示会议名+年份，arXiv论文显示评分
-            let badgeHtml = '';
-            if (isConference && paper.conference) {
-                badgeHtml = `<span class="pick-score conf-badge">${escapeHtml(paper.conference)} ${paper.conference_year || ''}</span>`;
-            } else if (paper.relevance_score > 0) {
-                let scoreClass = 'low';
-                if (paper.relevance_score >= 7) scoreClass = 'high';
-                else if (paper.relevance_score >= 5) scoreClass = 'medium';
-                badgeHtml = `<span class="pick-score ${scoreClass}">${paper.relevance_score}/10</span>`;
-            }
-
-            // 日期
-            let dateStr = '';
-            if (paper.published_date) {
-                try {
-                    const d = new Date(paper.published_date);
-                    // 会议论文只显示年份
-                    if (isConference) {
-                        dateStr = paper.conference_year ? `${paper.conference_year}` : d.getFullYear().toString();
-                    } else {
-                        dateStr = d.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' });
-                    }
-                } catch (_) {}
-            }
-
-            // 关键词/标签（最多显示3个）
-            let kwHtml = '';
-            const tags = paper.tags && paper.tags.length > 0 ? paper.tags : (paper.extracted_keywords || []);
-            if (tags.length > 0) {
-                kwHtml = '<div class="pick-keywords">' +
-                    tags.slice(0, 3).map(
-                        kw => `<span class="kw">${escapeHtml(kw)}</span>`
-                    ).join('') + '</div>';
-            }
-
-            // 摘要文本：优先 one_line_summary，其次 abstract
-            const summaryText = paper.one_line_summary
-                ? paper.one_line_summary.replace(/[#*_`]/g, '').substring(0, 120)
-                : (paper.abstract || '').substring(0, 120);
-
-            card.innerHTML = `
-                ${badgeHtml}
-                <div class="pick-title">${escapeHtml(paper.title || '无标题')}</div>
-                <div class="pick-summary">${escapeHtml(summaryText)}</div>
-                <div class="pick-meta">
-                    ${dateStr ? `<span>${dateStr}</span>` : ''}
-                    ${paper.is_starred ? '<span>★</span>' : ''}
-                    ${isConference && paper.paper_type ? `<span>${escapeHtml(paper.paper_type)}</span>` : ''}
-                </div>
-                ${kwHtml}
-            `;
-            container.appendChild(card);
-        });
+        // 渲染会议子版块
+        confContainer.innerHTML = '';
+        const confSub = document.getElementById('confPicksSubSection');
+        if (confPicks.length > 0) {
+            confPicks.forEach(p => confContainer.appendChild(_renderPickCard(p)));
+            if (confSub) confSub.style.display = '';
+        } else {
+            if (confSub) confSub.style.display = 'none';
+        }
 
         section.style.display = 'block';
     } catch (err) {
@@ -2556,17 +2583,18 @@ function closeExplorerModal() {
 // Explorer Tab 切换
 function setupExplorerTabs() {
     const tabs = document.querySelectorAll('.explorer-tab');
+    const panelMap = {
+        'arxiv': 'explorerArxivPanel',
+        'scholar': 'explorerScholarPanel',
+        'conference': 'explorerConferencePanel',
+    };
     tabs.forEach(tab => {
         tab.addEventListener('click', () => {
             const target = tab.dataset.explorerTab;
-            // 切换 Tab 样式
             tabs.forEach(t => t.classList.remove('active'));
             tab.classList.add('active');
-            // 切换面板
             document.querySelectorAll('.explorer-panel').forEach(p => p.classList.remove('active'));
-            const panel = document.getElementById(
-                target === 'scholar' ? 'explorerScholarPanel' : 'explorerConferencePanel'
-            );
+            const panel = document.getElementById(panelMap[target]);
             if (panel) panel.classList.add('active');
         });
     });
@@ -2602,7 +2630,35 @@ function setupExplorerEvents() {
     if (confBtn) {
         confBtn.addEventListener('click', () => startConferenceAnalysis());
     }
+
+    // ArXiv 检索按钮
+    const arxivSearchBtn = document.getElementById('arxivSearchBtn');
+    if (arxivSearchBtn) {
+        arxivSearchBtn.addEventListener('click', () => startArxivSearch());
+    }
+    const arxivInput = document.getElementById('arxivSearchInput');
+    if (arxivInput) {
+        arxivInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') startArxivSearch();
+        });
+    }
 }
+
+// PDF 上传按钮绑定
+document.addEventListener('DOMContentLoaded', () => {
+    const pdfUploadBtn = document.getElementById('pdfUploadBtn');
+    const pdfFileInput = document.getElementById('pdfFileInput');
+    if (pdfUploadBtn && pdfFileInput) {
+        pdfUploadBtn.addEventListener('click', () => pdfFileInput.click());
+        pdfFileInput.addEventListener('change', (e) => {
+            const file = e.target.files?.[0];
+            if (file) {
+                uploadAndParsePdf(file);
+                pdfFileInput.value = '';
+            }
+        });
+    }
+});
 
 // 初始化 Explorer 事件
 document.addEventListener('DOMContentLoaded', () => {
@@ -2725,6 +2781,82 @@ async function startScholarAnalysis() {
     } finally {
         analyzeBtn.disabled = false;
         analyzeBtn.textContent = '开始分析';
+    }
+}
+
+// ========== ArXiv 检索逻辑 ==========
+
+async function startArxivSearch() {
+    const query = document.getElementById('arxivSearchInput')?.value.trim();
+    if (!query) {
+        showError('请输入搜索关键词或 arXiv ID');
+        return;
+    }
+
+    const resultsDiv = document.getElementById('arxivSearchResults');
+    const progressDiv = document.getElementById('arxivSearchProgress');
+    const paperListDiv = document.getElementById('arxivPaperList');
+    const searchBtn = document.getElementById('arxivSearchBtn');
+
+    resultsDiv.style.display = 'block';
+    progressDiv.textContent = '正在搜索 arXiv...';
+    paperListDiv.innerHTML = '';
+    if (searchBtn) searchBtn.disabled = true;
+
+    try {
+        const resp = await fetch(`${API_BASE}/search/arxiv_query?q=${encodeURIComponent(query)}&max_results=15`);
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            throw new Error(err.detail || resp.statusText);
+        }
+        const papers = await resp.json();
+        progressDiv.textContent = papers.length > 0 ? `找到 ${papers.length} 篇论文` : '未找到相关论文';
+
+        papers.forEach(paper => {
+            const item = document.createElement('div');
+            item.className = 'explorer-paper-item';
+            const dateStr = paper.published_date ? paper.published_date.slice(0, 10) : '';
+            const authorsStr = (paper.authors || []).slice(0, 3).join(', ') + (paper.authors?.length > 3 ? ' 等' : '');
+            const abstract = paper.abstract ? paper.abstract.slice(0, 200) + (paper.abstract.length > 200 ? '...' : '') : '';
+            item.innerHTML = `
+                <div class="explorer-paper-title">
+                    <a href="https://arxiv.org/abs/${escapeHtml(paper.id)}" target="_blank">${escapeHtml(paper.title)}</a>
+                </div>
+                <div class="explorer-paper-meta">${escapeHtml(authorsStr)} · ${escapeHtml(dateStr)} · <span style="color:var(--text-muted);">${escapeHtml(paper.id)}</span></div>
+                <div class="explorer-paper-abstract">${escapeHtml(abstract)}</div>
+                <div style="margin-top:6px;">
+                    ${paper.already_saved
+                        ? `<span class="btn btn-secondary btn-compact" style="opacity:0.6;cursor:default;">已在库中</span>`
+                        : `<button class="btn btn-primary btn-compact arxiv-import-btn" data-id="${escapeHtml(paper.id)}">导入并分析</button>`
+                    }
+                </div>
+            `;
+            paperListDiv.appendChild(item);
+        });
+
+        // 绑定导入按钮
+        paperListDiv.querySelectorAll('.arxiv-import-btn').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const arxivId = btn.dataset.id;
+                btn.disabled = true;
+                btn.textContent = '导入中...';
+                try {
+                    const r = await fetch(`${API_BASE}/search?q=${encodeURIComponent(arxivId)}`);
+                    if (!r.ok) throw new Error(await r.text());
+                    btn.textContent = '已导入';
+                    btn.classList.remove('btn-primary');
+                    btn.classList.add('btn-secondary');
+                } catch (e) {
+                    btn.disabled = false;
+                    btn.textContent = '导入失败，重试';
+                    showError('导入失败: ' + e.message);
+                }
+            });
+        });
+    } catch (e) {
+        progressDiv.textContent = '搜索失败: ' + (e.message || '未知错误');
+    } finally {
+        if (searchBtn) searchBtn.disabled = false;
     }
 }
 

@@ -23,6 +23,9 @@ import httpx
 # 缓存目录：项目根目录/data/conference_cache/
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _CACHE_DIR = _PROJECT_ROOT / "data" / "conference_cache"
+# 独立的 AI 内容缓存文件（避免改写大型会议 JSON）
+_AI_CACHE_FILE = _CACHE_DIR / "ai_content_cache.json"
+_ai_cache_lock = None  # 延迟初始化（需要 asyncio loop）
 
 
 # 支持的会议配置
@@ -69,6 +72,8 @@ class ConferencePaper:
     conference: str = ""    # 会议名 (e.g., "CVPR")
     year: int = 0           # 年份
     paper_type: str = ""    # 论文类型 (Oral, Spotlight, Poster, etc.)
+    ai_keywords: List[str] = field(default_factory=list)   # LLM生成的关键词
+    ai_summary: str = ""                                    # LLM生成的一句话摘要
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -181,6 +186,115 @@ class ConferencePaperFetcher:
                 continue
         return sorted(result, key=lambda x: (x[0], x[1]), reverse=True)
 
+    def _load_ai_cache(self) -> dict:
+        """加载 AI 内容缓存（{title_hash: {keywords, summary}}）。"""
+        if not _AI_CACHE_FILE.exists():
+            return {}
+        try:
+            with open(_AI_CACHE_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+    def _save_ai_cache(self, cache: dict) -> None:
+        """原子写入 AI 内容缓存（写临时文件再重命名，避免写入中断破坏缓存）。"""
+        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = _AI_CACHE_FILE.with_suffix('.tmp')
+        try:
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(cache, f, ensure_ascii=False)
+            tmp.replace(_AI_CACHE_FILE)
+        except Exception as e:
+            print(f"  ⚠️ _save_ai_cache failed: {e}")
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    def _ai_cache_key(self, title: str) -> str:
+        import hashlib
+        return hashlib.md5(title.encode('utf-8')).hexdigest()
+
+    def get_ai_content(self, title: str) -> Tuple[List[str], str]:
+        """从独立缓存中读取 AI 关键词和摘要，不存在则返回空。"""
+        cache = self._load_ai_cache()
+        entry = cache.get(self._ai_cache_key(title), {})
+        return entry.get('keywords', []), entry.get('summary', '')
+
+    def update_paper_ai_content(self, conference: str, year: int, title: str,
+                                ai_keywords: List[str], ai_summary: str) -> bool:
+        """将 LLM 生成的关键词和摘要写入独立的小型缓存文件（不修改大型会议 JSON）。"""
+        try:
+            cache = self._load_ai_cache()
+            cache[self._ai_cache_key(title)] = {
+                'title': title,
+                'keywords': ai_keywords,
+                'summary': ai_summary,
+            }
+            self._save_ai_cache(cache)
+            return True
+        except Exception as e:
+            print(f"  ⚠️ update_paper_ai_content failed: {e}")
+            return False
+
+    def load_random_diverse_conference_papers(self, count: int = 10) -> List[ConferencePaper]:
+        """
+        从缓存中随机抽取若干篇会议论文，保证来源多样性（每个会议最多取3篇）。
+        AI 内容从独立小型缓存文件读取，不读写大型会议 JSON。
+        """
+        import random
+        ai_cache = self._load_ai_cache()
+        all_papers = []
+        if not _CACHE_DIR.exists():
+            return []
+        for f in _CACHE_DIR.glob("*.json"):
+            if f.name == _AI_CACHE_FILE.name:
+                continue  # 跳过 AI 内容缓存文件本身
+            try:
+                parts = f.stem.split('_')
+                if len(parts) != 2:
+                    continue
+                conf, year_str = parts
+                year = int(year_str)
+                with open(f, 'r', encoding='utf-8') as fh:
+                    data = json.load(fh)
+                for item in data:
+                    title = item.get('title', '')
+                    ai_entry = ai_cache.get(self._ai_cache_key(title), {})
+                    all_papers.append(ConferencePaper(
+                        title=title,
+                        authors=item.get('authors', []),
+                        abstract=item.get('abstract', ''),
+                        url=item.get('url', ''),
+                        arxiv_id=item.get('arxiv_id', ''),
+                        conference=item.get('conference', conf),
+                        year=item.get('year', year),
+                        paper_type=item.get('paper_type', ''),
+                        ai_keywords=ai_entry.get('keywords', []),
+                        ai_summary=ai_entry.get('summary', ''),
+                    ))
+            except Exception:
+                continue
+        if not all_papers:
+            return []
+        # 打乱后按会议限额采样，保证主题多样性
+        random.shuffle(all_papers)
+        per_conf_limit = 3
+        conf_count: dict = {}
+        result = []
+        for p in all_papers:
+            if len(result) >= count:
+                break
+            key = p.conference
+            if conf_count.get(key, 0) < per_conf_limit:
+                conf_count[key] = conf_count.get(key, 0) + 1
+                result.append(p)
+        # 若不够 count 篇再补充（不限制）
+        if len(result) < count:
+            extras = [p for p in all_papers if p not in result]
+            result.extend(extras[:count - len(result)])
+        return result
+
     def load_random_conference_papers(self, count: int = 10) -> List[ConferencePaper]:
         """
         从所有已缓存的会议论文中随机抽取若干篇，用于每日推荐。
@@ -191,6 +305,8 @@ class ConferencePaperFetcher:
         if not _CACHE_DIR.exists():
             return []
         for f in _CACHE_DIR.glob("*.json"):
+            if f.name == _AI_CACHE_FILE.name:
+                continue
             try:
                 with open(f, 'r', encoding='utf-8') as fh:
                     data = json.load(fh)
